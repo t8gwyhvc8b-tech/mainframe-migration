@@ -306,6 +306,7 @@ def run() -> None:
     source = root / ".claude" / "skills" / "mainframe-jcl-migration"
     target = root / ".devin" / "skills" / "mainframe-jcl-migration-devin"
     devin_mcp_config = root / ".devin" / "mcp_config.json"
+    legacy_devin_config = root / ".devin" / "config.json"
     cascade_mcp_config = (
         Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
     )
@@ -332,11 +333,13 @@ def run() -> None:
 
     adapt_skill(source, target)
     write_mcp_config(devin_mcp_config, command, arguments, environment)
+    write_mcp_config(legacy_devin_config, command, arguments, environment)
     write_mcp_config(cascade_mcp_config, command, arguments, environment)
 
     print("\nConfiguração concluída.")
     print("Skill: .devin/skills/mainframe-jcl-migration-devin/SKILL.md")
     print(f"MCP Devin Local: {devin_mcp_config}")
+    print(f"MCP Devin antigo: {legacy_devin_config}")
     print(f"MCP Cascade:     {cascade_mcp_config}")
     print(f"Runtime: {runtime_description}")
     print(f"Versão validada: {version}")
