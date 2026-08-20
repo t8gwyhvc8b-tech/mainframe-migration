@@ -14,6 +14,9 @@ from typing import Any
 
 
 DEFAULT_VERSION = "0.1.13"
+EXTENSION_DIRECTORY_PREFIX = (
+    "mainframe-migration-toolkit.mainframe-migration-toolkit-"
+)
 REQUIRED_TOOLS = {
     "mainframe_preflight",
     "mainframe_dependency_graph",
@@ -37,6 +40,70 @@ def running_on_windows() -> bool:
 def supported_python() -> bool:
     """Return whether the interpreter meets the toolkit requirement."""
     return sys.version_info >= (3, 10)
+
+
+def is_toolkit_runtime(path: Path, expected_version: str) -> bool:
+    """Return whether a directory contains the expected bundled runtime."""
+    package_main = path / "mainframe_modernization_toolkit" / "__main__.py"
+    if not package_main.is_file():
+        return False
+
+    manifest_path = path / "manifest.json"
+    if not manifest_path.is_file():
+        return True
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(manifest, dict)
+        and manifest.get("packageVersion") == expected_version
+    )
+
+
+def find_toolkit_runtime(root: Path, expected_version: str) -> Path:
+    """Locate toolkit sources in the repository or an installed VSIX."""
+    explicit = os.environ.get("MAINFRAME_TOOLKIT_RUNTIME")
+    candidates = [
+        root / "src",
+        root / "extension" / "python-runtime",
+    ]
+    if explicit:
+        candidates.insert(0, Path(explicit).expanduser())
+
+    extension_roots: list[Path] = []
+    configured_extensions = os.environ.get("VSCODE_EXTENSIONS")
+    if configured_extensions:
+        extension_roots.append(Path(configured_extensions).expanduser())
+    extension_roots.append(Path.home() / ".vscode" / "extensions")
+
+    extension_name = EXTENSION_DIRECTORY_PREFIX + expected_version
+    for extension_root in extension_roots:
+        candidates.append(extension_root / extension_name / "python-runtime")
+        if extension_root.is_dir():
+            candidates.extend(
+                extension / "python-runtime"
+                for extension in sorted(
+                    extension_root.glob(EXTENSION_DIRECTORY_PREFIX + "*"),
+                    reverse=True,
+                )
+            )
+
+    checked: set[Path] = set()
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved in checked:
+            continue
+        checked.add(resolved)
+        if is_toolkit_runtime(resolved, expected_version):
+            return resolved
+
+    locations = "\n  - ".join(str(path) for path in checked)
+    raise SetupError(
+        "runtime local do toolkit não encontrado. Locais verificados:\n  - "
+        + locations
+        + "\nDefina MAINFRAME_TOOLKIT_RUNTIME se o VSIX estiver em outro local."
+    )
 
 
 def adapt_skill(source: Path, target: Path) -> None:
@@ -185,10 +252,7 @@ def run() -> None:
     source = root / ".claude" / "skills" / "mainframe-jcl-migration"
     target = root / ".devin" / "skills" / "mainframe-jcl-migration-devin"
     mcp_config = root / ".devin" / "mcp_config.json"
-    toolkit_source = root / "src"
-
-    if not (toolkit_source / "mainframe_modernization_toolkit" / "__main__.py").is_file():
-        raise SetupError(f"código-fonte local do toolkit não encontrado em {toolkit_source}")
+    toolkit_source = find_toolkit_runtime(root, version)
 
     validate_runtime(toolkit_source, version)
     adapt_skill(source, target)
