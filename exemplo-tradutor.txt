@@ -8,8 +8,10 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import site
 import subprocess
 import sys
+import sysconfig
 from typing import Any
 
 
@@ -106,6 +108,40 @@ def find_toolkit_runtime(root: Path, expected_version: str) -> Path:
     )
 
 
+def find_toolkit_cli() -> Path | None:
+    """Locate the console command installed by the Python package."""
+    executable = shutil.which("mainframe-toolkit")
+    if executable is None and running_on_windows():
+        executable = shutil.which("mainframe-toolkit.exe")
+    if executable:
+        return Path(executable).resolve()
+
+    candidates = [
+        Path(sysconfig.get_path("scripts")) / "mainframe-toolkit.exe",
+        Path(site.getuserbase()) / "Scripts" / "mainframe-toolkit.exe",
+        Path(sys.executable).parent / "mainframe-toolkit.exe",
+        Path(sys.executable).parent / "Scripts" / "mainframe-toolkit.exe",
+    ]
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        candidates.extend(
+            Path(local_app_data).glob(
+                "Programs/Python/Python*/Scripts/mainframe-toolkit.exe"
+            )
+        )
+    app_data = os.environ.get("APPDATA")
+    if app_data:
+        candidates.extend(
+            Path(app_data).glob("Python/Python*/Scripts/mainframe-toolkit.exe")
+        )
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
 def adapt_skill(source: Path, target: Path) -> None:
     """Copy and adapt the Claude skill for Devin."""
     if not (source / "SKILL.md").is_file():
@@ -158,25 +194,25 @@ def load_config(path: Path) -> dict[str, Any]:
     return config
 
 
-def write_mcp_config(path: Path, toolkit_source: Path) -> None:
-    """Register the local source tree using the current Python interpreter."""
+def write_mcp_config(
+    path: Path,
+    command: Path,
+    arguments: list[str],
+    environment: dict[str, str] | None = None,
+) -> None:
+    """Register a validated local toolkit command."""
     config = load_config(path)
     servers = config.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
         raise SetupError(f"'mcpServers' em {path} precisa ser um objeto")
 
-    servers["mainframe-toolkit"] = {
-        "command": sys.executable,
-        "args": [
-            "-m",
-            "mainframe_modernization_toolkit",
-            "mcp",
-            "serve",
-        ],
-        "env": {
-            "PYTHONPATH": str(toolkit_source),
-        },
+    server: dict[str, Any] = {
+        "command": str(command),
+        "args": arguments,
     }
+    if environment:
+        server["env"] = environment
+    servers["mainframe-toolkit"] = server
 
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
@@ -240,6 +276,24 @@ def validate_runtime(toolkit_source: Path, expected_version: str) -> None:
         raise SetupError(f"versão inesperada: {installed_version}")
 
 
+def validate_cli(command: Path, expected_version: str) -> None:
+    """Verify the version exposed by an installed console command."""
+    version_check = subprocess.run(
+        [str(command), "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    installed_version = version_check.stdout.strip()
+    if version_check.returncode != 0:
+        detail = version_check.stderr.strip() or "falha sem mensagem"
+        raise SetupError(f"não foi possível executar {command}: {detail}")
+    if installed_version != expected_version:
+        raise SetupError(
+            f"versão inesperada em {command}: {installed_version}"
+        )
+
+
 def run() -> None:
     """Run the complete offline setup."""
     if not running_on_windows():
@@ -252,15 +306,34 @@ def run() -> None:
     source = root / ".claude" / "skills" / "mainframe-jcl-migration"
     target = root / ".devin" / "skills" / "mainframe-jcl-migration-devin"
     mcp_config = root / ".devin" / "mcp_config.json"
-    toolkit_source = find_toolkit_runtime(root, version)
 
-    validate_runtime(toolkit_source, version)
+    toolkit_cli = find_toolkit_cli()
+    if toolkit_cli is not None:
+        validate_cli(toolkit_cli, version)
+        command = toolkit_cli
+        arguments = ["mcp", "serve"]
+        environment = None
+        runtime_description = str(toolkit_cli)
+    else:
+        toolkit_source = find_toolkit_runtime(root, version)
+        validate_runtime(toolkit_source, version)
+        command = Path(sys.executable)
+        arguments = [
+            "-m",
+            "mainframe_modernization_toolkit",
+            "mcp",
+            "serve",
+        ]
+        environment = {"PYTHONPATH": str(toolkit_source)}
+        runtime_description = str(toolkit_source)
+
     adapt_skill(source, target)
-    write_mcp_config(mcp_config, toolkit_source)
+    write_mcp_config(mcp_config, command, arguments, environment)
 
     print("\nConfiguração concluída.")
     print("Skill: .devin/skills/mainframe-jcl-migration-devin/SKILL.md")
     print("MCP:   .devin/mcp_config.json")
+    print(f"Runtime: {runtime_description}")
     print(f"Versão validada: {version}")
     print("\nReinicie o Devin Desktop e invoque:")
     print("/mainframe-jcl-migration-devin <workspace> <JOB.jcl>")
