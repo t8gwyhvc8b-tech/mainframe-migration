@@ -25,11 +25,14 @@ case "$(uname -s)" in
   *) fail "este instalador deve ser executado no Git Bash do Windows" ;;
 esac
 
-command -v powershell.exe >/dev/null ||
-  fail "PowerShell do Windows não encontrado"
-
 command -v cygpath >/dev/null ||
   fail "cygpath não encontrado; execute o script pelo Git Bash"
+
+command -v curl >/dev/null ||
+    fail "curl não encontrado na instalação do Git Bash"
+
+command -v tar >/dev/null ||
+    fail "tar não encontrado na instalação do Git Bash"
 
 case "$(uname -m)" in
   x86_64|amd64) UV_TARGET="x86_64-pc-windows-msvc" ;;
@@ -40,145 +43,92 @@ esac
 mkdir -p "$TARGET" "$BIN_DIR" "$UV_CACHE_DIR"
 cp -R "$SOURCE/." "$TARGET/"
 
-PS_SCRIPT="$ROOT/.devin/setup-devin.tmp.ps1"
-trap 'rm -f "$PS_SCRIPT"' EXIT
-
-cat >"$PS_SCRIPT" <<'POWERSHELL'
-param(
-    [string]$SkillPath,
-    [string]$McpPath,
-    [string]$BinDir,
-    [string]$CacheDir,
-    [string]$ToolkitVersion,
-    [string]$UvVersion,
-    [string]$UvTarget
+REQUIRED_TOOLS=(
+    mainframe_preflight
+    mainframe_dependency_graph
+    mainframe_get_callers
+    mainframe_resolve_copybook
+    mainframe_impact_analysis
+    mainframe_run_migration_tool
+    mainframe_query_artifact
 )
 
-$ErrorActionPreference = "Stop"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$utf8 = New-Object Text.UTF8Encoding($false)
+MISSING_TOOLS=()
+for tool in "${REQUIRED_TOOLS[@]}"; do
+    grep -Fq "$tool" "$TARGET/SKILL.md" || MISSING_TOOLS+=("$tool")
+done
 
-$requiredTools = @(
-    "mainframe_preflight",
-    "mainframe_dependency_graph",
-    "mainframe_get_callers",
-    "mainframe_resolve_copybook",
-    "mainframe_impact_analysis",
-    "mainframe_run_migration_tool",
-    "mainframe_query_artifact"
-)
+if ((${#MISSING_TOOLS[@]})); then
+    fail "a skill MCP de origem não contém as tools esperadas: ${MISSING_TOOLS[*]}"
+fi
 
-$content = [IO.File]::ReadAllText($SkillPath, [Text.Encoding]::UTF8)
-$missing = @($requiredTools | Where-Object { -not $content.Contains($_) })
-if ($missing.Count -ne 0) {
-    throw "A skill MCP de origem não contém as tools esperadas: $($missing -join ', ')"
-}
+[[ "$(grep -Ec '^name:[[:space:]]*mainframe-jcl-migration[[:space:]]*$' "$TARGET/SKILL.md")" == "1" ]] ||
+    fail "não foi possível adaptar o nome da skill"
 
-$namePattern = "(?m)^name:\s*mainframe-jcl-migration\s*$"
-if ([regex]::Matches($content, $namePattern).Count -ne 1) {
-    throw "Não foi possível adaptar o nome da skill."
-}
-$content = [regex]::Replace(
-    $content,
-    $namePattern,
-    "name: mainframe-jcl-migration-devin",
-    1
-)
+SKILL_TEMP="$TARGET/SKILL.md.tmp"
+trap 'rm -f "$SKILL_TEMP" "$BIN_DIR/uv.zip.tmp" "$MCP_CONFIG.tmp"' EXIT
 
-if ($content -notmatch "(?m)^triggers:") {
-    $argumentPattern = "(?m)^(argument-hint:[^\r\n]*(?:\r?\n))"
-    if ([regex]::Matches($content, $argumentPattern).Count -ne 1) {
-        throw "Não foi possível adicionar os triggers."
-    }
-    $content = [regex]::Replace(
-        $content,
-        $argumentPattern,
-        ('$1' + "triggers:`n  - user`n  - model`n"),
-        1
-    )
-}
-[IO.File]::WriteAllText($SkillPath, $content, $utf8)
+sed 's/^name:[[:space:]]*mainframe-jcl-migration[[:space:]]*$/name: mainframe-jcl-migration-devin/' \
+    "$TARGET/SKILL.md" >"$SKILL_TEMP"
+mv "$SKILL_TEMP" "$TARGET/SKILL.md"
 
-[IO.Directory]::CreateDirectory($BinDir) | Out-Null
-[IO.Directory]::CreateDirectory($CacheDir) | Out-Null
-$uvxPath = Join-Path $BinDir "uvx.exe"
-if (-not (Test-Path -LiteralPath $uvxPath -PathType Leaf)) {
-    $archive = Join-Path ([IO.Path]::GetTempPath()) ("uv-" + [Guid]::NewGuid() + ".zip")
-    $url = "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-$UvTarget.zip"
-    Write-Host "Baixando runtime portátil uv $UvVersion..."
-    try {
-        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
-        Expand-Archive -LiteralPath $archive -DestinationPath $BinDir -Force
-    }
-    finally {
-        Remove-Item -LiteralPath $archive -Force -ErrorAction SilentlyContinue
-    }
-}
-if (-not (Test-Path -LiteralPath $uvxPath -PathType Leaf)) {
-    throw "O pacote portátil do uv não forneceu $uvxPath."
+if ! grep -Eq '^triggers:[[:space:]]*$' "$TARGET/SKILL.md"; then
+    awk '
+        { print }
+        !inserted && /^argument-hint:/ {
+            print "triggers:"
+            print "  - user"
+            print "  - model"
+            inserted = 1
+        }
+        END { if (!inserted) exit 42 }
+    ' "$TARGET/SKILL.md" >"$SKILL_TEMP" ||
+        fail "não foi possível adicionar os triggers"
+    mv "$SKILL_TEMP" "$TARGET/SKILL.md"
+fi
+
+if [[ ! -f "$UVX" ]]; then
+    UV_ARCHIVE="$BIN_DIR/uv.zip.tmp"
+    UV_URL="https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$UV_TARGET.zip"
+    printf 'Baixando runtime portátil uv %s...\n' "$UV_VERSION"
+    curl --fail --location --retry 3 --silent --show-error \
+        --output "$UV_ARCHIVE" \
+        "$UV_URL"
+    tar -xf "$UV_ARCHIVE" -C "$BIN_DIR" ||
+        fail "não foi possível extrair o runtime portátil com o tar do Git Bash"
+    rm -f "$UV_ARCHIVE"
+fi
+
+[[ -f "$UVX" ]] ||
+    fail "o pacote portátil do uv não forneceu $UVX"
+
+json_escape() {
+    sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
-if (Test-Path -LiteralPath $McpPath -PathType Leaf) {
-    try {
-        $config = [IO.File]::ReadAllText($McpPath, [Text.Encoding]::UTF8) |
-            ConvertFrom-Json
-    }
-    catch {
-        throw "JSON inválido em ${McpPath}: $($_.Exception.Message)"
-    }
-}
-else {
-    $config = [PSCustomObject]@{}
-}
+UVX_WINDOWS="$(cygpath -aw "$UVX" | json_escape)"
+UV_CACHE_WINDOWS="$(cygpath -aw "$UV_CACHE_DIR" | json_escape)"
 
-if ($config -isnot [PSCustomObject]) {
-    throw "$McpPath precisa conter um objeto JSON."
-}
-if ($null -eq $config.PSObject.Properties["mcpServers"]) {
-    $config | Add-Member -NotePropertyName "mcpServers" -NotePropertyValue ([PSCustomObject]@{})
-}
-if ($config.mcpServers -isnot [PSCustomObject]) {
-    throw "'mcpServers' em $McpPath precisa ser um objeto."
-}
-
-$server = [ordered]@{
-    command = $uvxPath
-    args = @(
-        "--from",
-        "mainframe-modernization-toolkit==$ToolkitVersion",
-        "mainframe-toolkit",
-        "mcp",
-        "serve"
-    )
-    env = [ordered]@{
-        UV_CACHE_DIR = $CacheDir
+cat >"$MCP_CONFIG.tmp" <<JSON
+{
+    "mcpServers": {
+        "mainframe-toolkit": {
+            "command": "$UVX_WINDOWS",
+            "args": [
+                "--from",
+                "mainframe-modernization-toolkit==$VERSION",
+                "mainframe-toolkit",
+                "mcp",
+                "serve"
+            ],
+            "env": {
+                "UV_CACHE_DIR": "$UV_CACHE_WINDOWS"
+            }
+        }
     }
 }
-$config.mcpServers |
-    Add-Member -NotePropertyName "mainframe-toolkit" -NotePropertyValue $server -Force
-
-$json = $config | ConvertTo-Json -Depth 20
-$temporary = "$McpPath.tmp"
-[IO.File]::WriteAllText($temporary, $json + [Environment]::NewLine, $utf8)
-Move-Item -LiteralPath $temporary -Destination $McpPath -Force
-[void](ConvertFrom-Json ([IO.File]::ReadAllText($McpPath, [Text.Encoding]::UTF8)))
-POWERSHELL
-
-powershell.exe \
-  -NoLogo \
-  -NoProfile \
-  -NonInteractive \
-  -ExecutionPolicy Bypass \
-  -File "$(cygpath -w "$PS_SCRIPT")" \
-  "$(cygpath -w "$TARGET/SKILL.md")" \
-  "$(cygpath -w "$MCP_CONFIG")" \
-  "$(cygpath -w "$BIN_DIR")" \
-  "$(cygpath -w "$UV_CACHE_DIR")" \
-  "$VERSION" \
-  "$UV_VERSION" \
-  "$UV_TARGET"
-
-rm -f "$PS_SCRIPT"
+JSON
+mv "$MCP_CONFIG.tmp" "$MCP_CONFIG"
 trap - EXIT
 
 printf 'Validando pacote %s...\n' "$VERSION"
