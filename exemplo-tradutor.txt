@@ -305,7 +305,10 @@ def run() -> None:
     version = os.environ.get("MAINFRAME_TOOLKIT_VERSION", DEFAULT_VERSION)
     source = root / ".claude" / "skills" / "mainframe-jcl-migration"
     target = root / ".devin" / "skills" / "mainframe-jcl-migration-devin"
-    mcp_config = root / ".devin" / "mcp_config.json"
+    devin_mcp_config = root / ".devin" / "mcp_config.json"
+    cascade_mcp_config = (
+        Path.home() / ".codeium" / "windsurf" / "mcp_config.json"
+    )
 
     toolkit_cli = find_toolkit_cli()
     if toolkit_cli is not None:
@@ -328,11 +331,13 @@ def run() -> None:
         runtime_description = str(toolkit_source)
 
     adapt_skill(source, target)
-    write_mcp_config(mcp_config, command, arguments, environment)
+    write_mcp_config(devin_mcp_config, command, arguments, environment)
+    write_mcp_config(cascade_mcp_config, command, arguments, environment)
 
     print("\nConfiguração concluída.")
     print("Skill: .devin/skills/mainframe-jcl-migration-devin/SKILL.md")
-    print("MCP:   .devin/mcp_config.json")
+    print(f"MCP Devin Local: {devin_mcp_config}")
+    print(f"MCP Cascade:     {cascade_mcp_config}")
     print(f"Runtime: {runtime_description}")
     print(f"Versão validada: {version}")
     print("\nReinicie o Devin Desktop e invoque:")
